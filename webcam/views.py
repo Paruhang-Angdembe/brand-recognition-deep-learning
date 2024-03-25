@@ -8,8 +8,9 @@ import numpy as np
 from PIL import Image
 import time
 
+
 # Assuming `utils` has been adapted for PyTorch or provides framework-agnostic functions
-import core.utils_copy as utils
+import core.utils_v2 as utils
 
 from ultralytics import YOLO
 
@@ -54,10 +55,6 @@ def video_feed_1(request):
 	return StreamingHttpResponse(stream_1(), content_type='multipart/x-mixed-replace; boundary=frame')
 # -----------------------------------
 
-# Load the YOLOv8 model
-# model_path = '../yolov8_weight/best.pt'
-# model = torch.jit.load('./yolov8_weight/best.pt')
-
 model = YOLO('./yolov8_weight/best.pt')
 
 # model.eval()  # Set the model to evaluation mode
@@ -66,77 +63,84 @@ obj_classes = ["Apple", "Facebook", "Samsung", "Microsoft", "Google", "Others"]
 num_classes = 6
 
 # YOLO DETECTION for YOLOv8 --------------------
+
 def detection(vid):
-    global model, obj_classes  # Assuming 'model' and 'obj_classes' are defined globally or accessible otherwise
+    global model, obj_classes
     
     with torch.no_grad():  # Disable gradient calculation for inference
+    
         return_value, frame = vid.read()
         if not return_value:
             raise ValueError("No image!")
-
+        
         frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-        image_data = utils.image_preprocess(np.copy(frame_rgb), [640, 640])
+        # Preprocess the image for the model; ensure this matches your model's requirements
+        image_data = preprocess_image(frame_rgb, [640, 640])
 
-        pred_bbox = model(image_data)
+        # Run the model on the preprocessed image
+        pred_bbox = model(image_data, conf=0.65)
+        print(type(pred_bbox))
+        print(pred_bbox)
 
-        formatted_boxes = []
-        print("Sample of formatted boxes:", formatted_boxes[:5])
+        print('here')
 
+        # Format the model's output for further processing
+        formatted_boxes = format_boxes(pred_bbox, obj_classes)
 
-        if hasattr(pred_bbox, 'boxes') and len(pred_bbox.boxes):
-            for box in pred_bbox.boxes:
-                x1, y1, x2, y2, score, class_id = box.xyxy[0], box.xyxy[1], box.xyxy[2], box.xyxy[3], box.confidence, box.class_id
-                formatted_boxes.append([x1, y1, x2, y2, score, class_id])
+        # Draw bounding boxes on the original image
+        result_image = draw_bboxes(frame_rgb, formatted_boxes, obj_classes)
+        
+        # Convert the result back to BGR for OpenCV compatibility
+        result = cv2.cvtColor(result_image, cv2.COLOR_RGB2BGR)
+        
+        # Count detected objects by class
+        # Convert formatted_boxes to a numpy array
+        formatted_boxes_array = np.array(formatted_boxes)
 
-        formatted_boxes = np.array(formatted_boxes) if formatted_boxes else np.empty((0, 6))
-
-        bboxes = utils.postprocess_boxes(formatted_boxes, frame.shape[:2], 640, 0.3) if formatted_boxes.size else formatted_boxes
-        print("Boxes after post-processing:", bboxes)
-
-        bboxes = utils.nms(bboxes, 0.45, method='nms') if bboxes.size else bboxes
-
-        image, detected = utils.draw_bbox(frame_rgb.copy(), bboxes) if bboxes.size else (frame_rgb.copy(), np.empty((0, 6)))
-
-        if detected.size:
-            class_count = [np.sum(detected[:, 5] == i) for i in range(len(obj_classes))]
+        # Check if formatted_boxes_array is not empty and is two-dimensional
+        if formatted_boxes_array.ndim == 2 and formatted_boxes_array.size > 0:
+            class_count = [np.sum(formatted_boxes_array[:, -1] == i) for i in range(len(obj_classes))]
         else:
+            # Handle the case where formatted_boxes is empty or not as expected
             class_count = [0 for _ in range(len(obj_classes))]
 
-        result = cv2.cvtColor(image, cv2.COLOR_RGB2BGR)
+        
         return result, class_count
 
+def format_boxes(pred_bbox, obj_classes):
+    formatted_boxes = []
 
-# def detection(vid):
-#     global model, obj_classes  # Assuming 'model' and 'obj_classes' are defined globally or accessible otherwise
-    
-#     with torch.no_grad():  # Disable gradient calculation for inference
-#         return_value, frame = vid.read()
-#         if not return_value:
-#             raise ValueError("No image!")
+    if pred_bbox:
+        # Assuming the first element in pred_bbox list for a single image scenario
+        results = pred_bbox[0]
+        
+        # Directly access the 'xyxy', 'conf', and 'cls' attributes of the 'boxes'
+        if hasattr(results.boxes, 'xyxy') and hasattr(results.boxes, 'conf') and hasattr(results.boxes, 'cls'):
+            # Convert tensors to numpy arrays if they are not already
+            xyxy = results.boxes.xyxy.cpu().numpy() if isinstance(results.boxes.xyxy, torch.Tensor) else results.boxes.xyxy
+            conf = results.boxes.conf.cpu().numpy() if isinstance(results.boxes.conf, torch.Tensor) else results.boxes.conf
+            cls = results.boxes.cls.cpu().numpy() if isinstance(results.boxes.cls, torch.Tensor) else results.boxes.cls
+            
+            # Iterate through each box and format the bounding box information
+            for i in range(xyxy.shape[0]):  # Assuming xyxy is a 2D array with shape [num_boxes, 4]
+                x1, y1, x2, y2 = xyxy[i]
+                score = conf[i]
+                class_id = cls[i]
+                formatted_boxes.append([x1, y1, x2, y2, score, class_id])
 
-#         frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-#         image_data = utils.image_preprocess(np.copy(frame_rgb), [640, 640])
+    return formatted_boxes
 
-#         pred_bbox = model(image_data)
 
-#         formatted_boxes = []
 
-#         if hasattr(pred_bbox, 'boxes') and len(pred_bbox.boxes):
-#             for box in pred_bbox.boxes:
-#                 x1, y1, x2, y2, score, class_id = box.xyxy[0], box.xyxy[1], box.xyxy[2], box.xyxy[3], box.confidence, box.class_id
-#                 formatted_boxes.append([x1, y1, x2, y2, score, class_id])
 
-#         formatted_boxes = np.array(formatted_boxes) if formatted_boxes else np.empty((0, 6))
 
-#         bboxes = utils.postprocess_boxes(formatted_boxes, frame.shape[:2], 640, 0.3) if formatted_boxes.size else formatted_boxes
-#         bboxes = utils.nms(bboxes, 0.45, method='nms') if bboxes.size else bboxes
+def preprocess_image(image, target_size):
+    # Adapted preprocessing to match your model's requirements
+    # Include resizing and normalization steps as necessary
+    return utils.image_preprocess(image, target_size)
 
-#         image, detected = utils.draw_bbox(frame_rgb.copy(), bboxes) if bboxes.size else (frame_rgb.copy(), np.empty((0, 6)))
+def draw_bboxes(image, bboxes, obj_classes):
+    # Utilize your existing drawing function or adapt it as necessary
+    return utils.draw_bounding_boxes(image, bboxes, obj_classes=obj_classes, show_label=True)
 
-#         if detected.size:
-#             class_count = [np.sum(detected[:, 5] == i) for i in range(len(obj_classes))]
-#         else:
-#             class_count = [0 for _ in range(len(obj_classes))]
 
-#         result = cv2.cvtColor(image, cv2.COLOR_RGB2BGR)
-#         return result, class_count
