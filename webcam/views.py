@@ -1,18 +1,18 @@
-from django.shortcuts import render
-
-# Create your views here.
 from django.http import HttpResponse
 from django.template import RequestContext, loader
 from django.http.response import StreamingHttpResponse
 
+import torch
 import cv2
 import numpy as np
-import datetime
+from PIL import Image
 import time
 
-import core.utils as utils
-import tensorflow as tf
-from PIL import Image
+# Assuming `utils` has been adapted for PyTorch or provides framework-agnostic functions
+import core.utils_copy as utils
+
+from ultralytics import YOLO
+
 
 # HOME PAGE -------------------------
 def index(request):
@@ -54,67 +54,89 @@ def video_feed_1(request):
 	return StreamingHttpResponse(stream_1(), content_type='multipart/x-mixed-replace; boundary=frame')
 # -----------------------------------
 
-# # PARAMETERS FOR YOLO----------------
-obj_classes = ["person", "bicycle", "car", "motorbike", "aeroplane", "bus", "train", "truck", "boat", "traffic light", "fire hydrant", "stop sign", "parking meter", "bench", "bird", "cat", "dog", "horse", "sheep", "cow", "elephant", "bear", "zebra", "giraffe", "backpack", "umbrella", "handbag", "tie", "suitcase", "frisbee", "skis", "snowboard", "sports ball", "kite", "baseball bat", "baseball glove", "skateboard", "surfboard", "tennis racket", "bottle", "wine glass", "cup", "fork", "knife", "spoon", "bowl", "banana", "apple", "sandwich", "orange", "broccoli", "carrot", "hot dog", "pizza", "donut", "cake", "chair", "sofa", "pottedplant", "bed", "diningtable", "toilet", "tvmonitor", "laptop", "mouse", "remote", "keyboard", "cell phone", "microwave", "oven", "toaster", "sink", "refrigerator", "book", "clock", "vase", "scissors", "teddy bear", "hair drier", "toothbrush"]
+# Load the YOLOv8 model
+# model_path = '../yolov8_weight/best.pt'
+# model = torch.jit.load('./yolov8_weight/best.pt')
 
-return_elements = ["input/input_data:0", "pred_sbbox/concat_2:0", "pred_mbbox/concat_2:0", "pred_lbbox/concat_2:0"]
-pb_file         = "./yolov3_weight/yolov3_coco.pb"
-num_classes     = 80
-input_size      = 416
-graph           = tf.Graph()
-return_tensors  = utils.read_pb_return_tensors(graph, pb_file, return_elements)
-# -----------------------------------
+model = YOLO('./yolov8_weight/best.pt')
 
-# YOLO DETECTION --------------------
+# model.eval()  # Set the model to evaluation mode
+
+obj_classes = ["Apple", "Facebook", "Samsung", "Microsoft", "Google", "Others"]
+num_classes = 6
+
+# YOLO DETECTION for YOLOv8 --------------------
 def detection(vid):
-	with tf.Session(graph=graph) as sess:
+    global model, obj_classes  # Assuming 'model' and 'obj_classes' are defined globally or accessible otherwise
+    
+    with torch.no_grad():  # Disable gradient calculation for inference
+        return_value, frame = vid.read()
+        if not return_value:
+            raise ValueError("No image!")
 
-		return_value, frame = vid.read()
-		if return_value:
-			frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-			image = Image.fromarray(frame)
-		else:
-			raise ValueError("No image!")
+        frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+        image_data = utils.image_preprocess(np.copy(frame_rgb), [640, 640])
 
+        pred_bbox = model(image_data)
 
-		frame_size = frame.shape[:2]
-		image_data = utils.image_preporcess(np.copy(frame), [input_size, input_size])
-		image_data = image_data[np.newaxis, ...]
-		prev_time = time.time()
-
-		pred_sbbox, pred_mbbox, pred_lbbox = sess.run(
-			[return_tensors[1], return_tensors[2], return_tensors[3]],
-					feed_dict={ return_tensors[0]: image_data})
-
-		pred_bbox = np.concatenate([np.reshape(pred_sbbox, (-1, 5 + num_classes)),
-									np.reshape(pred_mbbox, (-1, 5 + num_classes)),
-									np.reshape(pred_lbbox, (-1, 5 + num_classes))], axis=0)
-
-		bboxes = utils.postprocess_boxes(pred_bbox, frame_size, input_size, 0.3)
-		bboxes = utils.nms(bboxes, 0.45, method='nms')
-		image, detected = utils.draw_bbox(frame, bboxes)
+        formatted_boxes = []
+        print("Sample of formatted boxes:", formatted_boxes[:5])
 
 
-		detected = np.asarray(detected)
+        if hasattr(pred_bbox, 'boxes') and len(pred_bbox.boxes):
+            for box in pred_bbox.boxes:
+                x1, y1, x2, y2, score, class_id = box.xyxy[0], box.xyxy[1], box.xyxy[2], box.xyxy[3], box.confidence, box.class_id
+                formatted_boxes.append([x1, y1, x2, y2, score, class_id])
 
-		# print("------- frame i ---------")
+        formatted_boxes = np.array(formatted_boxes) if formatted_boxes else np.empty((0, 6))
 
-		class_count = []
+        bboxes = utils.postprocess_boxes(formatted_boxes, frame.shape[:2], 640, 0.3) if formatted_boxes.size else formatted_boxes
+        print("Boxes after post-processing:", bboxes)
 
-		for i in range(len(obj_classes)):   # 80
-			obj_count = 0
-			for j in range(len(detected)):
-				if int(detected[j][5]) == i: obj_count += 1
+        bboxes = utils.nms(bboxes, 0.45, method='nms') if bboxes.size else bboxes
 
-			class_count = np.append(class_count, obj_count)
+        image, detected = utils.draw_bbox(frame_rgb.copy(), bboxes) if bboxes.size else (frame_rgb.copy(), np.empty((0, 6)))
 
-		curr_time = time.time()
-		exec_time = curr_time - prev_time
-		result = np.asarray(image)
-		info = "time: %.2f ms" %(1000*exec_time)
-		# cv2.namedWindow("result", cv2.WINDOW_AUTOSIZE)
-		result = cv2.cvtColor(image, cv2.COLOR_RGB2BGR)
-		
-	return result, class_count
-# -----------------------------------
+        if detected.size:
+            class_count = [np.sum(detected[:, 5] == i) for i in range(len(obj_classes))]
+        else:
+            class_count = [0 for _ in range(len(obj_classes))]
 
+        result = cv2.cvtColor(image, cv2.COLOR_RGB2BGR)
+        return result, class_count
+
+
+# def detection(vid):
+#     global model, obj_classes  # Assuming 'model' and 'obj_classes' are defined globally or accessible otherwise
+    
+#     with torch.no_grad():  # Disable gradient calculation for inference
+#         return_value, frame = vid.read()
+#         if not return_value:
+#             raise ValueError("No image!")
+
+#         frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+#         image_data = utils.image_preprocess(np.copy(frame_rgb), [640, 640])
+
+#         pred_bbox = model(image_data)
+
+#         formatted_boxes = []
+
+#         if hasattr(pred_bbox, 'boxes') and len(pred_bbox.boxes):
+#             for box in pred_bbox.boxes:
+#                 x1, y1, x2, y2, score, class_id = box.xyxy[0], box.xyxy[1], box.xyxy[2], box.xyxy[3], box.confidence, box.class_id
+#                 formatted_boxes.append([x1, y1, x2, y2, score, class_id])
+
+#         formatted_boxes = np.array(formatted_boxes) if formatted_boxes else np.empty((0, 6))
+
+#         bboxes = utils.postprocess_boxes(formatted_boxes, frame.shape[:2], 640, 0.3) if formatted_boxes.size else formatted_boxes
+#         bboxes = utils.nms(bboxes, 0.45, method='nms') if bboxes.size else bboxes
+
+#         image, detected = utils.draw_bbox(frame_rgb.copy(), bboxes) if bboxes.size else (frame_rgb.copy(), np.empty((0, 6)))
+
+#         if detected.size:
+#             class_count = [np.sum(detected[:, 5] == i) for i in range(len(obj_classes))]
+#         else:
+#             class_count = [0 for _ in range(len(obj_classes))]
+
+#         result = cv2.cvtColor(image, cv2.COLOR_RGB2BGR)
+#         return result, class_count
